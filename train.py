@@ -94,9 +94,11 @@ def preprocess_labels(ds, project_labels):
     return mlb.fit_transform(ds["labels"]), list(mlb.classes_)
 
 
-def init_model(params):
-    # {'n_units': 80, 'activation': 'leaky_relu', 'dropout_rate': 0.30000000000000004, 'learning_rate': 0.0007190600962946125, 'alpha': 0.17}
+def get_team_member_flags(contributors, ds):
+    return ds["creator"].apply(lambda x: int(x in contributors))
 
+
+def init_model(params):
     if params['activation'] == 'relu':
         dense_layer = tf.keras.layers.Dense(
             params['n_units'],
@@ -179,18 +181,23 @@ def encode_label_combinations(combs, project_labels):
     return encoded_combs
 
 
-def get_features(embedding_vectors, encoded_combs, total_labels):
+def get_features(embedding_vectors, encoded_combs, total_labels, is_team_member_flags):
     features = list(zip(
         embedding_vectors,
         encoded_combs,
-        total_labels
+        total_labels,
+        is_team_member_flags,
     ))
 
     train_data = []
 
-    for embedding_vector, encoded_issue_combs, total_issue_labels in features:
+    for embedding_vector, encoded_issue_combs, total_issue_labels, is_team_member_flag in features:
         for encoded_issue_comb in encoded_issue_combs:
-            X = np.concatenate((embedding_vector, encoded_issue_comb.astype(float)))
+            X = np.concatenate((
+                embedding_vector,
+                encoded_issue_comb.astype(float),
+                np.array([ is_team_member_flag ], dtype=float),
+            ))
             y = total_issue_labels
             train_data.append((X, y))
 
@@ -220,8 +227,9 @@ with mlflow.start_run():
 
     combs = generate_label_combinations(ds)
     encoded_combs = encode_label_combinations(combs, data["project_labels"])
+    is_team_member_flags = get_team_member_flags(data["contributors"], ds)
 
-    features = get_features(embedding_vectors, encoded_combs, labels)
+    features = get_features(embedding_vectors, encoded_combs, labels, is_team_member_flags)
 
     X = np.array([ x for x, _ in features ])
     y = np.array([ y for _, y in features ])
@@ -264,7 +272,8 @@ with mlflow.start_run():
 
     embedding_vector = get_bert_embeddings(["Some text here"])[0]
     chosed_tags = encode_label_combinations([[[]]], data["project_labels"])[0][0]
-    input_array = np.concatenate((embedding_vector, chosed_tags))
+    is_team_member_flag = 0
+    input_array = np.concatenate((embedding_vector, chosed_tags, np.array([is_team_member_flag], dtype=float)))
 
     probabilities = model.predict(np.array([input_array]))
     predicted_classes_flags = (probabilities > THRESHOLD).astype(int)[0]
@@ -275,6 +284,7 @@ with mlflow.start_run():
     print("[log] Publish new model version ...")
     model_config = {
         "project_labels": label_classes,
+        "contributors": data["contributors"],
         "threshold": THRESHOLD,
     }
     config_file = "config.json"
