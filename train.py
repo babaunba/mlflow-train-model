@@ -1,6 +1,7 @@
 import mlflow
 import argparse
 import re
+from itertools import combinations
 
 import metric_logger
 import optuna
@@ -14,7 +15,7 @@ from bs4 import BeautifulSoup
 from sklearn.preprocessing import MultiLabelBinarizer
 from transformers import BertTokenizer, BertModel
 import torch
-
+import numpy as np
 
 import tensorflow as tf
 
@@ -155,6 +156,47 @@ def objective(trial):
     return max(history.history['val_accuracy'])
 
 
+def generate_label_combinations(df):
+    all_combinations = []
+    for _, row in df.iterrows():
+        labels = row["labels"]
+        issue_label_combinations = []
+        for r in range(len(labels) + 1):
+            combos = combinations(labels, r)
+            issue_label_combinations.extend(combos)
+        all_combinations.append(issue_label_combinations)
+    return all_combinations
+
+
+def encode_label_combinations(combs, project_labels):
+    mlb = MultiLabelBinarizer(classes=project_labels)
+    encoded_combs = []
+
+    for issue_combs in combs:
+        encoded_issue_combs = mlb.fit_transform(issue_combs)
+        encoded_combs.append(encoded_issue_combs)
+
+    return encoded_combs
+
+
+def get_features(embedding_vectors, encoded_combs, total_labels):
+    features = list(zip(
+        embedding_vectors,
+        encoded_combs,
+        total_labels
+    ))
+
+    train_data = []
+
+    for embedding_vector, encoded_issue_combs, total_issue_labels in features:
+        for encoded_issue_comb in encoded_issue_combs:
+            X = np.concatenate((embedding_vector, encoded_issue_comb.astype(float)))
+            y = total_issue_labels
+            train_data.append((X, y))
+
+    return train_data
+
+
 with mlflow.start_run():
     args = parse_args()
     tokenizer = BertTokenizer.from_pretrained('prajjwal1/bert-small')
@@ -176,7 +218,19 @@ with mlflow.start_run():
     embedding_vectors = get_embedding_vectors(ds)
     labels, label_classes = preprocess_labels(ds, data["project_labels"])
 
-    X_train, X_test, y_train, y_test = train_test_split(embedding_vectors, labels, test_size=0.2, random_state=SEED)
+    combs = generate_label_combinations(ds)
+    encoded_combs = encode_label_combinations(combs, data["project_labels"])
+
+    features = get_features(embedding_vectors, encoded_combs, labels)
+
+    X = np.array([ x for x, _ in features ])
+    y = np.array([ y for _, y in features ])
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=SEED)
+
+    print(f"[log] Total data: {(X.shape, y.shape)}")
+    print(f"[log] Train data: {(X_train.shape, y_train.shape)}")
+    print(f"[log] Test data: {(X_test.shape, y_test.shape)}")
 
     print("[log] Find best hyper params ...")
 
@@ -208,10 +262,15 @@ with mlflow.start_run():
 
     print("[log] Check model work ...")
 
-    probabilities = model.predict(X_test[:1])
+    embedding_vector = get_bert_embeddings(["Some text here"])[0]
+    chosed_tags = encode_label_combinations([[[]]], data["project_labels"])[0][0]
+    input_array = np.concatenate((embedding_vector, chosed_tags))
+
+    probabilities = model.predict(np.array([input_array]))
     predicted_classes_flags = (probabilities > THRESHOLD).astype(int)[0]
     predicted_classes = [ label_classes[class_index] for class_index, is_predicted in enumerate(predicted_classes_flags) if is_predicted ]
-    print(f"Predicted classes: {predicted_classes}")
+
+    print(predicted_classes)
 
     print("[log] Publish new model version ...")
     model_config = {
