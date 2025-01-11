@@ -3,6 +3,7 @@ import argparse
 import re
 
 import metric_logger
+import optuna
 
 import json
 
@@ -92,6 +93,68 @@ def preprocess_labels(ds, project_labels):
     return mlb.fit_transform(ds["labels"]), list(mlb.classes_)
 
 
+def init_model(params):
+    # {'n_units': 80, 'activation': 'leaky_relu', 'dropout_rate': 0.30000000000000004, 'learning_rate': 0.0007190600962946125, 'alpha': 0.17}
+
+    if params['activation'] == 'relu':
+        dense_layer = tf.keras.layers.Dense(
+            params['n_units'],
+            activation=params['activation'],
+        )
+    else:
+        dense_layer = tf.keras.layers.Dense(params['n_units'])
+
+    if params['activation'] == 'leaky_relu':
+        activation_layer = tf.keras.layers.LeakyReLU(alpha=params['alpha'])
+    else:
+        activation_layer = None
+
+    layers = [
+        tf.keras.layers.InputLayer(input_shape=(X_train.shape[1],)),
+        dense_layer,
+        activation_layer,
+        tf.keras.layers.Dropout(params['dropout_rate']),
+        tf.keras.layers.Dense(y_train.shape[1], activation='sigmoid')
+    ]
+
+    model = tf.keras.Sequential([ layer for layer in layers if layer is not None ])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=params['learning_rate']),
+        loss="binary_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    return model
+
+
+def create_model(trial):
+    n_units = trial.suggest_int('n_units', 128, 256, step=64)
+    activation = trial.suggest_categorical('activation', ['relu', 'leaky_relu'])
+    dropout_rate = trial.suggest_float('dropout_rate', 0.0, 0.5, step=0.1)
+    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
+    alpha = trial.suggest_float('alpha', 0.01, 0.3, step=0.01)
+
+    return init_model({
+        'n_units': n_units,
+        'activation': activation,
+        'dropout_rate': dropout_rate,
+        'learning_rate': learning_rate,
+        'alpha': alpha,
+    })
+
+
+def objective(trial):
+    model = create_model(trial)
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_test, y_test),
+        epochs=10,
+        batch_size=16,
+        verbose=0,
+    )
+    return max(history.history['val_accuracy'])
+
+
 with mlflow.start_run():
     args = parse_args()
     tokenizer = BertTokenizer.from_pretrained('prajjwal1/bert-small')
@@ -115,18 +178,20 @@ with mlflow.start_run():
 
     X_train, X_test, y_train, y_test = train_test_split(embedding_vectors, labels, test_size=0.2, random_state=SEED)
 
+    print("[log] Find best hyper params ...")
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=30)
+
+    print("[log] Best params:")
+    for key, value in study.best_params.items():
+        print(f"- {key} = {value}")
+        mlflow.log_param(key, value)
+
     print("[log] Initialize model ...")
 
-    model = tf.keras.Sequential([
-        tf.keras.layers.InputLayer(input_shape=(X_train.shape[1],)),
-        tf.keras.layers.Dense(labels.shape[1], activation='sigmoid')
-    ])
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-        loss='binary_crossentropy',
-        metrics=['accuracy']
-    )
+    model = init_model(study.best_params)
+    model.summary()
 
     print(model.summary())
 
