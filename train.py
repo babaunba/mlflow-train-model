@@ -2,6 +2,8 @@ import mlflow
 import argparse
 import re
 
+import metric_logger
+
 import json
 
 import pandas as pd 
@@ -135,7 +137,8 @@ with mlflow.start_run():
         y_train,
         epochs=40,
         batch_size=8,
-        validation_data=(X_test, y_test)
+        validation_data=(X_test, y_test),
+        callbacks=[metric_logger.MLflowLogger()],
     )
 
     print("[log] Check model work ...")
