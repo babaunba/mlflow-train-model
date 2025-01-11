@@ -1,0 +1,8 @@
+name: Train new version of model
+python_env: python_env.yaml
+
+entry_points:
+  main:
+    parameters:
+      dataset_run_id: string
+    command: "python train.py --dataset-run-id {dataset_run_id}"
